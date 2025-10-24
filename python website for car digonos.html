@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vehicle Diagnostic Orchestrator</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles for better readability of JSON output */
+        #reportOutput {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-family: 'Consolas', 'Courier New', monospace;
+        }
+        .container-wrapper {
+            min-height: 100vh;
+            background-color: #f7f9fb; /* Light background */
+        }
+    </style>
+    <script>
+        // --- CONSTANTS ---
+        const FUEL_TRIM_HIGH_THRESHOLD = 15.0;
+        const O2_VOLTAGE_LOW_THRESHOLD = 0.2;
+        const MISFIRE_DTC_CYLINDER_2 = "P0302";
+        
+        // --- MOCK DATA FOR DEMONSTRATION ---
+        // This mock data is what the symptom checker will use.
+        const MOCK_TELEMETRY_DATA = {
+            "short_term_fuel_trim_bank1": [16.5, 17.0, 15.5],  // High FT to trigger rule
+            "o2_voltage_bank1": [0.15, 0.18, 0.19],            // Low O2 to trigger rule
+            "engine_temp": [90.0, 91.0, 90.5],
+            "rpm": [1500, 1550, 1600]
+        };
+
+        const MOCK_META_DATA = {
+            "vehicle_model": "Viper", 
+            "age": 7, 
+            "mileage": 150000
+        };
+
+
+        // --- CONCEPTUAL TYPE DEFINITIONS (JavaScript Classes) ---
+
+        class TelemetryData {
+            constructor(data) {
+                this._data = data;
+            }
+
+            mean(parameter) {
+                const values = this._data[parameter] || [];
+                if (values.length === 0) return null;
+                const sum = values.reduce((a, b) => a + b, 0);
+                return sum / values.length;
+            }
+        }
+
+        class Session {
+            constructor(dtcs, meta, telemetryData) {
+                this.dtcs = dtcs;
+                this.meta = meta;
+                this._telemetryData = telemetryData;
+            }
+
+            telemetry_window(duration_s = 60) {
+                return new TelemetryData(this._telemetryData);
+            }
+        }
+
+        // --- EXTERNAL DEPENDENCIES (Mocks) ---
+
+        class DTC_DB {
+            static lookup(code) {
+                // Mock database behavior
+                if (code.startsWith('P')) {
+                    return `Powertrain: Misfire or Emissions issue (Mock definition for ${code})`;
+                }
+                if (code.startsWith('U')) {
+                    return `Network: Communication error (Mock definition for ${code})`;
+                }
+                return `Generic definition for ${code}`;
+            }
+        }
+
+        class MLModel {
+            static predict_rank(features) {
+                // Mock ML prediction logic
+                if (features.dtc_count > 1 && features.age > 5) {
+                    return [
+                        {"cause": "Spark Plug (High Confidence due to age)", "confidence": 0.95},
+                        {"cause": "O2 Sensor Bank 1", "confidence": 0.75}
+                    ];
+                }
+                return [
+                    {"cause": "Generic Check Needed", "confidence": 0.5},
+                ];
+            }
+        }
+
+        function build_features(telemetry, dtcs, meta) {
+            // Feature engineering mock
+            return {
+                "dtc_count": dtcs.length, 
+                "age": meta.age,
+                "fuel_trim_mean": telemetry.mean("short_term_fuel_trim_bank1")
+            };
+        }
+
+        function aggregate_findings(findings) {
+            // Simple aggregation: combines all findings
+            return {
+                "summary": `Diagnosis complete. Found ${findings.length} total findings from three distinct systems.`,
+                "details": findings,
+                "confidence_score_avg": (findings.reduce((sum, f) => sum + (f.confidence || 0), 0) / findings.length).toFixed(2)
+            };
+        }
+
+        // --- DIAGNOSTIC STEP FUNCTIONS ---
+
+        function _run_dtc_mapping(dtcs) {
+            const dtc_findings = [];
+            for (const code of dtcs) {
+                try {
+                    const mapping = DTC_DB.lookup(code);
+                    dtc_findings.push({
+                        "source": "DTC_MAPPING",
+                        "code": code,
+                        "mapping": mapping,
+                        "confidence": 1.0
+                    });
+                } catch (e) {
+                    console.error(`Error looking up DTC ${code}: ${e}`);
+                    continue;
+                }
+            }
+            return dtc_findings;
+        }
+
+        function _run_symptom_checks(dtcs, telemetry) {
+            const symptom_findings = [];
+
+            if (dtcs.includes(MISFIRE_DTC_CYLINDER_2)) {
+                const ft = telemetry.mean("short_term_fuel_trim_bank1");
+                const o2 = telemetry.mean("o2_voltage_bank1");
+                
+                // Rule: High Fuel Trim (>15%) AND Low O2 Voltage (<0.2V)
+                if (ft !== null && o2 !== null && ft > FUEL_TRIM_HIGH_THRESHOLD && o2 < O2_VOLTAGE_LOW_THRESHOLD) {
+                    symptom_findings.push({
+                        "source": "SYMPTOM_CHECK",
+                        "probable_cause": "injector_cylinder_2",
+                        "reason": `High fuel trim (${ft.toFixed(1)}%) and low O2 voltage (${o2.toFixed(2)}V) strongly suggest a lean condition, often due to an injector failure on Bank 1.`,
+                        "confidence": 0.85
+                    });
+                }
+            }
+            return symptom_findings;
+        }
+
+        function _run_ml_prediction(session, telemetry) {
+            const ml_findings = [];
+            try {
+                const features = build_features(telemetry, session.dtcs, session.meta);
+                const ml_ranking = MLModel.predict_rank(features);
+
+                for (let i = 0; i < ml_ranking.length; i++) {
+                    const result = ml_ranking[i];
+                    ml_findings.push({
+                        "source": "ML_MODEL",
+                        "rank": i + 1,
+                        "cause": result.cause,
+                        "confidence": result.confidence || 0.0
+                    });
+                }
+
+            } catch (e) {
+                console.error(`ML Prediction failed: ${e}`);
+                ml_findings.push({
+                    "source": "ML_MODEL",
+                    "error": "Prediction failed",
+                    "details": String(e),
+                    "confidence": 0.0
+                });
+            }
+            return ml_findings;
+        }
+
+
+        // --- MAIN DIAGNOSIS ORCHESTRATION (JS translation of Python's diagnose) ---
+
+        function diagnose(session) {
+            const findings = [];
+            
+            const telemetry = session.telemetry_window();
+
+            // 1. DTC Mapping
+            findings.push(..._run_dtc_mapping(session.dtcs));
+
+            // 2. Symptom Checks
+            findings.push(..._run_symptom_checks(session.dtcs, telemetry));
+
+            // 3. ML Prediction
+            findings.push(..._run_ml_prediction(session, telemetry));
+
+            // 4. Final Composition
+            return aggregate_findings(findings);
+        }
+
+        // --- UI INTERACTION LOGIC ---
+
+        function displayMessage(message, type = 'success') {
+            const msgBox = document.getElementById('messageBox');
+            msgBox.textContent = message;
+            msgBox.className = `p-3 rounded-xl mb-4 text-center ${type === 'error' ? 'bg-red-100 text-red-800' : 'bg-green-100 text-green-800'}`;
+            msgBox.classList.remove('hidden');
+        }
+
+        function runDiagnosis() {
+            const dtcInput = document.getElementById('dtcInput').value.toUpperCase();
+            const outputElement = document.getElementById('reportOutput');
+            
+            outputElement.textContent = "Running analysis...";
+            document.getElementById('reportCard').classList.add('animate-pulse');
+
+            // 1. Parse Input
+            const dtcList = dtcInput.split(/[\s,]+/).filter(d => d.trim() !== '');
+
+            if (dtcList.length === 0) {
+                outputElement.textContent = "";
+                document.getElementById('reportCard').classList.remove('animate-pulse');
+                displayMessage("Please enter at least one DTC code.", 'error');
+                return;
+            }
+
+            // 2. Initialize Session
+            const session = new Session(dtcList, MOCK_META_DATA, MOCK_TELEMETRY_DATA);
+
+            // 3. Run Diagnosis
+            try {
+                const finalReport = diagnose(session);
+
+                // 4. Display Results
+                outputElement.textContent = JSON.stringify(finalReport, null, 4);
+                
+                document.getElementById('reportCard').classList.remove('animate-pulse');
+                displayMessage(`Diagnosis complete! ${finalReport.details.length} findings processed.`, 'success');
+
+            } catch (error) {
+                outputElement.textContent = `Error during diagnosis: ${error.message}`;
+                document.getElementById('reportCard').classList.remove('animate-pulse');
+                displayMessage("An unexpected error occurred. Check console for details.", 'error');
+                console.error(error);
+            }
+        }
+        
+        // Function to initialize the UI with default values
+        window.onload = () => {
+            document.getElementById('dtcInput').value = "P0302, U0100"; // Default example input
+            document.getElementById('telemetryInfo').innerHTML = `
+                <ul class="list-disc list-inside text-sm text-gray-600">
+                    <li>Fuel Trim (Bank 1): Average **${new TelemetryData(MOCK_TELEMETRY_DATA).mean("short_term_fuel_trim_bank1").toFixed(1)}%** (Rule Trigger: >${FUEL_TRIM_HIGH_THRESHOLD}%)</li>
+                    <li>O2 Voltage (Bank 1): Average **${new TelemetryData(MOCK_TELEMETRY_DATA).mean("o2_voltage_bank1").toFixed(2)}V** (Rule Trigger: <${O2_VOLTAGE_LOW_THRESHOLD}V)</li>
+                    <li>Vehicle Age: **${MOCK_META_DATA.age} years** (Used by ML Model)</li>
+                </ul>
+            `;
+            document.getElementById('runButton').addEventListener('click', runDiagnosis);
+            
+            // Run diagnosis immediately on load for demo
+            runDiagnosis();
+        };
+
+    </script>
+</head>
+<body class="container-wrapper font-sans antialiased p-4 sm:p-8">
+
+    <div class="max-w-4xl mx-auto">
+        <header class="text-center py-6">
+            <h1 class="text-4xl font-extrabold text-gray-800">Vehicle Diagnostic Orchestrator</h1>
+            <p class="text-gray-500 mt-2">Simulating a multi-stage diagnostic process (Rules, Symptoms, ML).</p>
+        </header>
+
+        <div id="messageBox" class="hidden p-3 rounded-xl mb-4 text-center"></div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+            <!-- Input Card -->
+            <div class="lg:col-span-1 bg-white p-6 rounded-2xl shadow-lg border border-gray-100 h-full">
+                <h2 class="text-xl font-semibold mb-4 text-gray-700 border-b pb-2">Diagnostic Inputs</h2>
+                
+                <label for="dtcInput" class="block text-sm font-medium text-gray-700 mb-2">Enter DTC Codes (Comma-separated)</label>
+                <input 
+                    type="text" 
+                    id="dtcInput" 
+                    placeholder="e.g., P0302, U0100" 
+                    class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150 mb-4 uppercase"
+                >
+
+                <div class="bg-blue-50 p-4 rounded-xl mb-4">
+                    <h3 class="font-semibold text-blue-800 mb-2">Mock Telemetry Data</h3>
+                    <p class="text-sm text-blue-600 mb-2">The symptom check uses the following fixed data points:</p>
+                    <div id="telemetryInfo"></div>
+                </div>
+
+                <button id="runButton" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg transition duration-300 shadow-md hover:shadow-lg focus:outline-none focus:ring-4 focus:ring-blue-500 focus:ring-opacity-50">
+                    Run Diagnosis
+                </button>
+            </div>
+
+            <!-- Output Card -->
+            <div id="reportCard" class="lg:col-span-2 bg-white p-6 rounded-2xl shadow-xl border border-gray-100 transition-all duration-300">
+                <h2 class="text-xl font-semibold mb-4 text-gray-700 border-b pb-2 flex items-center">
+                    Diagnostic Report (JSON) 
+                </h2>
+                
+                <div class="bg-gray-800 p-4 rounded-xl overflow-x-auto">
+                    <pre id="reportOutput" class="text-sm text-green-300"></pre>
+                </div>
+                
+            </div>
+        </div>
+
+        <footer class="text-center text-sm text-gray-500 pt-6 border-t mt-4">
+            Built using Python logic translated to JavaScript for web demonstration.
+        </footer>
+    </div>
+
+</body>
+</html>
